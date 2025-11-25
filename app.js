@@ -9,14 +9,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // 启动日志
-console.log('=== 服务器启动 ===');
+console.log('=== 服务器启动（仅MP4支持） ===');
 console.log('时间:', new Date().toISOString());
-console.log('环境变量检查:', {
-    COS_BUCKET_NAME: process.env.COS_BUCKET_NAME,
-    COS_REGION: process.env.COS_REGION,
-    COS_SECRET_ID: process.env.COS_SECRET_ID ? '已设置' : '未设置',
-    COS_SECRET_KEY: process.env.COS_SECRET_KEY ? '已设置' : '未设置'
-});
+console.log('支持格式: .mp4 only');
 
 // CORS 配置
 app.use(cors({
@@ -53,28 +48,32 @@ const COS_REGION = process.env.COS_REGION || 'ap-beijing';
 // 内存存储配置
 const storage = multer.memoryStorage();
 
+// 仅支持 MP4 的 multer 配置
 const upload = multer({
     storage: storage,
     fileFilter: function (req, file, cb) {
-        console.log('🔍 文件类型检查:', file.mimetype, file.originalname);
+        console.log('🔍 文件检查:', {
+            filename: file.originalname,
+            mimetype: file.mimetype,
+            extension: path.extname(file.originalname).toLowerCase()
+        });
         
-        const allowedTypes = [
-            'video/mp4', 
-            'video/webm', 
-            'video/ogg', 
-            'video/quicktime', 
-            'video/x-msvideo',
-            'video/avi',
-            'video/mov',
-            'video/mkv'
-        ];
+        // 严格的 MP4 验证
+        const allowedMimeTypes = ['video/mp4', 'video/mp4v-es', 'application/mp4'];
+        const isMP4MimeType = allowedMimeTypes.includes(file.mimetype);
+        const isMP4Extension = path.extname(file.originalname).toLowerCase() === '.mp4';
         
-        if (file.mimetype.startsWith('video/') || allowedTypes.includes(file.mimetype)) {
-            console.log('✅ 文件类型验证通过');
+        if (isMP4MimeType && isMP4Extension) {
+            console.log('✅ MP4 文件验证通过');
             cb(null, true);
         } else {
-            console.log('❌ 文件类型不支持');
-            cb(new Error(`不支持的文件类型: ${file.mimetype}`), false);
+            console.log('❌ 文件类型拒绝 - 只支持 .mp4 格式');
+            console.log('收到:', {
+                mimetype: file.mimetype,
+                extension: path.extname(file.originalname),
+                expected: '.mp4'
+            });
+            cb(new Error('只支持 .mp4 格式的视频文件。请检查文件格式。'), false);
         }
     },
     limits: {
@@ -86,7 +85,7 @@ const upload = multer({
 // 视频数据存储
 let videos = [];
 
-// COS 上传函数（增强版）
+// COS 上传函数
 async function uploadToCOS(fileBuffer, filename, contentType) {
     return new Promise((resolve, reject) => {
         if (!cos) {
@@ -97,7 +96,6 @@ async function uploadToCOS(fileBuffer, filename, contentType) {
         console.log('🚀 开始上传到 COS:', {
             filename: filename,
             size: fileBuffer.length,
-            contentType: contentType,
             bucket: COS_BUCKET,
             region: COS_REGION
         });
@@ -111,18 +109,10 @@ async function uploadToCOS(fileBuffer, filename, contentType) {
             ContentLength: fileBuffer.length
         }, (err, data) => {
             if (err) {
-                console.error('❌ COS 上传失败:', {
-                    error: err.message,
-                    code: err.code,
-                    stack: err.stack
-                });
+                console.error('❌ COS 上传失败:', err.message);
                 reject(new Error(`文件上传失败: ${err.message}`));
             } else {
-                console.log('✅ COS 上传成功:', {
-                    filename: filename,
-                    etag: data.ETag,
-                    requestId: data.RequestId
-                });
+                console.log('✅ COS 上传成功');
                 const videoUrl = `https://${COS_BUCKET}.cos.${COS_REGION}.myqcloud.com/videos/${filename}`;
                 resolve(videoUrl);
             }
@@ -132,11 +122,10 @@ async function uploadToCOS(fileBuffer, filename, contentType) {
 
 // 生成安全的文件名
 function generateSafeFilename(originalName) {
-    const extension = path.extname(originalName);
-    const baseName = path.basename(originalName, extension);
+    const baseName = path.basename(originalName, '.mp4');
     const safeBaseName = baseName.replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/g, '_');
     const uniqueId = uuidv4();
-    return `${safeBaseName}_${uniqueId}${extension}`;
+    return `${safeBaseName}_${uniqueId}.mp4`;
 }
 
 // 工具函数：格式化文件大小
@@ -150,75 +139,15 @@ function formatFileSize(bytes) {
 
 // ==================== API 路由 ====================
 
-// 存储桶测试接口
-app.get('/api/test-cos', (req, res) => {
-    console.log('🔧 存储桶测试被调用');
-    
-    if (!cos) {
-        return res.json({
-            success: false,
-            message: 'COS 客户端未初始化'
-        });
-    }
-
-    // 测试存储桶访问
-    cos.headBucket({
-        Bucket: COS_BUCKET,
-        Region: COS_REGION
-    }, (err, data) => {
-        if (err) {
-            console.error('❌ 存储桶访问失败:', err);
-            return res.json({
-                success: false,
-                test: 'bucket_access',
-                error: err.message,
-                errorCode: err.code,
-                suggestion: '请检查存储桶配置'
-            });
-        }
-
-        // 测试上传小文件
-        const testContent = Buffer.from('COS connection test - ' + new Date().toISOString());
-        const testKey = `test-${Date.now()}.txt`;
-        
-        cos.putObject({
-            Bucket: COS_BUCKET,
-            Region: COS_REGION,
-            Key: testKey,
-            Body: testContent,
-            ContentLength: testContent.length
-        }, (uploadErr, uploadData) => {
-            if (uploadErr) {
-                console.error('❌ 存储桶写入失败:', uploadErr);
-                return res.json({
-                    success: false,
-                    test: 'bucket_write', 
-                    error: uploadErr.message,
-                    errorCode: uploadErr.code,
-                    suggestion: '请检查存储桶权限'
-                });
-            }
-
-            console.log('✅ 存储桶测试完全通过');
-            res.json({
-                success: true,
-                message: '存储桶配置正确',
-                bucket: COS_BUCKET,
-                region: COS_REGION,
-                testFile: testKey
-            });
-        });
-    });
-});
-
 // 健康检查
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'OK',
         timestamp: new Date().toISOString(),
         service: '视频服务器 API',
-        version: '1.0.0-fixed',
-        storage: '腾讯云 COS'
+        version: '1.0.0-mp4-only',
+        supported_formats: ['.mp4'],
+        max_file_size: '100MB'
     });
 });
 
@@ -253,28 +182,19 @@ app.get('/api/videos', (req, res) => {
     }
 });
 
-// 上传视频（修复版）
+// 上传视频（仅 MP4）
 app.post('/api/upload', upload.single('video'), async (req, res) => {
-    console.log('=== 上传请求开始 ===');
-    console.log('请求头:', req.headers);
-    console.log('请求体类型:', req.headers['content-type']);
+    console.log('=== MP4 上传开始 ===');
     
     try {
-        // 检查 multer 是否处理了文件
+        // 检查文件是否收到
         if (!req.file) {
-            console.log('❌ Multer 未处理文件，可能原因:');
-            console.log('- 文件大小超限');
-            console.log('- 文件类型不支持'); 
-            console.log('- Content-Type 不正确');
-            console.log('- 请求体格式错误');
-            
+            console.log('❌ Multer 未处理文件');
             return res.status(400).json({
                 success: false,
-                message: '没有收到文件，请检查文件格式和大小',
-                details: {
-                    maxSize: '100MB',
-                    allowedTypes: ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv']
-                }
+                message: '没有收到文件或文件格式不支持',
+                supported_formats: ['.mp4'],
+                max_size: '100MB'
             });
         }
 
@@ -282,11 +202,16 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
             originalName: req.file.originalname,
             size: req.file.size,
             mimetype: req.file.mimetype,
-            bufferLength: req.file.buffer?.length,
-            fieldname: req.file.fieldname
+            bufferLength: req.file.buffer?.length
         });
 
-        // 生成安全文件名
+        // 检查 COS 配置
+        if (!cos) {
+            console.log('❌ COS 客户端未就绪');
+            throw new Error('云存储服务未配置');
+        }
+
+        // 生成文件名
         const safeFilename = generateSafeFilename(req.file.originalname);
         console.log('📁 生成文件名:', safeFilename);
 
@@ -295,7 +220,7 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
         const videoUrl = await uploadToCOS(
             req.file.buffer,
             safeFilename,
-            req.file.mimetype
+            'video/mp4'
         );
 
         console.log('✅ COS 上传成功，URL:', videoUrl);
@@ -305,22 +230,22 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
             id: uuidv4(),
             filename: safeFilename,
             originalName: req.file.originalname,
-            title: req.body.title || req.file.originalname.replace(/\.[^/.]+$/, ""),
+            title: req.body.title || req.file.originalname.replace('.mp4', ''),
             size: req.file.size,
-            mimeType: req.file.mimetype,
+            mimeType: 'video/mp4',
             uploadDate: new Date().toISOString(),
             duration: '0:00',
             url: videoUrl
         };
 
-        // 添加到内存存储
+        // 添加到列表
         videos.push(newVideo);
 
-        console.log('🎉 上传流程完成，视频已保存');
+        console.log('🎉 MP4 上传流程完成');
 
         res.json({
             success: true,
-            message: '视频上传成功',
+            message: 'MP4 视频上传成功',
             video: newVideo
         });
 
@@ -329,42 +254,32 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
         res.status(500).json({
             success: false,
             message: error.message || '上传失败',
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            supported_formats: ['.mp4']
         });
     }
 });
 
-// 模拟上传接口（备用方案）
-app.post('/api/upload-mock', (req, res) => {
-    console.log('🔄 使用模拟上传');
-    
-    try {
-        const mockVideo = {
-            id: uuidv4(),
-            title: '模拟视频 ' + new Date().toLocaleString(),
-            originalName: 'mock-video.mp4',
-            size: 15728640,
-            mimeType: 'video/mp4',
-            uploadDate: new Date().toISOString(),
-            duration: '2:30',
-            url: 'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4',
-            message: '模拟上传 - COS 可能有问题'
-        };
-
-        videos.push(mockVideo);
-
-        res.json({
-            success: true,
-            message: '模拟上传成功',
-            video: mockVideo
-        });
-
-    } catch (error) {
-        res.status(500).json({
+// 文件格式测试接口
+app.post('/api/test-format', upload.single('video'), (req, res) => {
+    if (!req.file) {
+        return res.json({
             success: false,
-            message: '模拟上传失败: ' + error.message
+            message: '文件验证失败',
+            reason: '未收到文件或格式不支持',
+            supported: '.mp4 only'
         });
     }
+
+    res.json({
+        success: true,
+        message: '文件格式验证通过',
+        fileInfo: {
+            name: req.file.originalname,
+            type: req.file.mimetype,
+            size: req.file.size,
+            supported: true
+        }
+    });
 });
 
 // 删除视频
@@ -395,11 +310,10 @@ app.delete('/api/videos/:id', async (req, res) => {
                     }, (err, data) => {
                         if (err) {
                             console.error('COS 删除失败:', err);
-                            reject(err);
                         } else {
                             console.log('✅ COS 文件删除成功');
-                            resolve(data);
                         }
+                        resolve();
                     });
                 });
             } catch (deleteError) {
@@ -427,15 +341,16 @@ app.delete('/api/videos/:id', async (req, res) => {
 // 根路径
 app.get('/', (req, res) => {
     res.json({
-        message: '视频服务器 API - 修复版',
+        message: '视频服务器 API - MP4专用版',
         timestamp: new Date().toISOString(),
         status: '运行中',
+        supported_formats: ['.mp4'],
+        max_file_size: '100MB',
         endpoints: {
             'GET /api/health': '健康检查',
-            'GET /api/test-cos': 'COS 连接测试',
             'GET /api/videos': '获取视频列表',
-            'POST /api/upload': '上传视频',
-            'POST /api/upload-mock': '模拟上传',
+            'POST /api/upload': '上传MP4视频',
+            'POST /api/test-format': '测试文件格式',
             'DELETE /api/videos/:id': '删除视频'
         }
     });
@@ -448,7 +363,7 @@ app.use((error, req, res, next) => {
         if (error.code === 'LIMIT_FILE_SIZE') {
             return res.status(400).json({
                 success: false,
-                message: '文件太大，请选择小于100MB的文件'
+                message: '文件太大，请选择小于100MB的MP4文件'
             });
         }
     }
@@ -456,17 +371,16 @@ app.use((error, req, res, next) => {
     console.error('服务器错误:', error);
     res.status(500).json({
         success: false,
-        message: '服务器内部错误'
+        message: error.message || '服务器内部错误'
     });
 });
 
 // 启动服务器
 app.listen(PORT, '0.0.0.0', () => {
-    console.log('🚀 视频服务器启动成功 - 修复版');
+    console.log('🚀 视频服务器启动成功 - MP4专用版');
     console.log('📍 端口:', PORT);
-    console.log('☁️  存储: 腾讯云 COS');
-    console.log('📦 存储桶:', COS_BUCKET);
-    console.log('🌍 区域:', COS_REGION);
+    console.log('🎯 支持格式: .mp4 only');
+    console.log('💾 存储: 腾讯云 COS');
     console.log('✅ 状态: 就绪');
 });
 
